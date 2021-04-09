@@ -1,0 +1,688 @@
+; Archvo:	Lab5 
+; Dispositivo:	PIC16F887
+; Autor:	Daniel González 
+; Carnet:	171506
+; Compilador:	pic-as (v2.30), MPLABX v5.40
+;    
+; Programa:	Proyecto 1
+; Hardware:	Semaforo para tresvías con contador
+; Creado: Marzo, 2021
+; Ultima modificación: 08 de abril, 2021
+;-------------------------------------------------------------------------------
+PROCESSOR 16F887
+#include <xc.inc>
+
+; configuración word1
+ CONFIG FOSC=INTRC_NOCLKOUT //Oscilador interno sin salidas
+ CONFIG WDTE=OFF	    //WDT disabled (reinicio repetitivo del pic)
+ CONFIG PWRTE=ON	    //PWRT enabled (espera de 72ms al iniciar
+ CONFIG MCLRE=OFF	    //pin MCLR se utiliza como I/O
+ CONFIG CP=OFF		    //Sin protección de código
+ CONFIG CPD=OFF		    //Sin protección de datos
+ 
+ CONFIG BOREN=OFF	    //Sin reinicio cuando el voltaje baja de 4v
+ CONFIG IESO=OFF	    //Reinicio sin cambio de reloj de interno a externo
+ CONFIG FCMEN=OFF	    //Cambio de reloj externo a interno en caso de falla
+ CONFIG LVP=ON		    //Programación en bajo voltaje permitida
+ 
+;configuración word2
+  CONFIG WRT=OFF	    //Protección de autoescritura 
+  CONFIG BOR4V=BOR40V	    //Reinicio abajo de 4V 
+
+;---------------------------- Macros para los TIMERS ---------------------------
+reiniciar_Tmr0 macro	;Reinicio Tmr0
+    banksel TMR0	;Banco Tmr0
+    movlw   25
+    movwf   TMR0        
+    bcf	    T0IF	;Limpieza de overflow para reiniciar 
+    endm		;Finalización de macro
+reiniciar_Tmr1 macro	;Reinicio 
+    movlw   0x0B	;Configuración 1 segundo 
+    movwf   TMR1H	;Asignación de un valor en la configuracion del Tmr1H
+    movlw   0xDC
+    movwf   TMR1L	;Asignar un valor en la configuración del TmrL
+    bcf	    TMR1IF	;Limpieza en la bandera del carry
+    endm
+reiniciar_tmr2 macro	;Reinicio Tmr2
+    banksel PR2
+    movlw   244		;Mueve el valor a w
+    movwf   PR2		
+    
+    banksel T2CON
+    clrf    TMR2	;Limpia el registro 
+    bcf	    TMR2IF	;Limpia la bandera
+    endm
+    
+  PSECT udata_bank0 ;common memory
+; --------------- Declaración de todas las variables ---------------------------
+    banderas:	      DS 1
+    estado:	      DS 1
+    parpadeo:	      DS 1
+    Sem_1:	      DS 1	;Variable Semaforo 1
+    Sem_2:	      DS 1	;Variable Semaforo 2
+    Sem_3:            DS 1	;Variable semaforo 3
+    Sem1_Temp:        DS 1	;Estados de semaforo 
+    Sem1_Ahora:	      DS 1
+    Sem2_Temp:        DS 1
+    Sem2_Ahora:	      DS 1
+    Sem3_Temp:	      DS 1
+    Sem3_Ahora:	      DS 1
+    Cont_1:	      DS 1	;Conteo para semaforo1
+    centena:	      DS 1	
+    centena1:	      DS 1
+    decena:	      DS 1
+    decena1:	      DS 1
+    unidad1:	      DS 1
+    unidad:	      DS 1  
+    valor_actual:     DS 1
+    Cont_2:	      DS 1	;Conteo para el semaforo 2 
+    centena2:	      DS 1
+    centena22:	      DS 1
+    decena2:	      DS 1
+    decena22:	      DS 1
+    unidad2:	      DS 1
+    unidad22:	      DS 1  
+    Cont_3:	      DS 1	;Conteno para el semaforo 3
+    centena3:	      DS 1
+    centena33:	      DS 1
+    decena3:	      DS 1
+    decena33:	      DS 1
+    unidad3:	      DS 1
+    unidad33:	      DS 1  
+    Cont_4: 	      DS 1	;Subrutina de conversión a decimal 
+    centena4:	      DS 1
+    centena44:	      DS 1
+    decena4:	      DS 1
+    decena44:	      DS 1
+    unidad4:	      DS 1
+    unidad44:	      DS 1  
+    
+  PSECT udata_shr ;common memory
+    w_T:	      DS  1	;1 byte apartado
+    STATUS_T:         DS  1	;1 byte
+    PCLATH_T:         DS  1
+  
+  PSECT resVect, class=CODE, abs, delta=2
+  ;------------------------ vector reset ---------------------------------------
+  
+  ORG 00h	;posición 000h para el reset
+  resetVec:
+    PAGESEL main
+    goto main
+    
+  PSECT intVect, class=CODE, abs, delta=2
+  
+  ;------------------------- interripción reset --------------------------------
+  
+  ORG 04h	;posición 0004h para interr
+  
+push:
+    movf    w_T
+    swapf   STATUS, W
+    movwf   STATUS_T
+    movf    PCLATH, W
+    movwf   PCLATH_T
+  isr:
+    btfsc   RBIF
+
+    
+    btfsc   T0IF
+    call    Interr_Tmr0
+    
+    btfsc   TMR2IF
+    call    Interr_Tmr2
+  pop:
+    movf    PCLATH_T, W
+    movwf   PCLATH
+    swapf   STATUS_T, W
+    movwf   STATUS
+    swapf   w_T, F
+    swapf   w_T, W
+    retfie		;Regresa la interrupción y vuelve a habilitar 
+    
+;------------------------- SubrutinasInterrupción ------------------------------
+    
+Interr_Tmr0:
+    reiniciar_Tmr0	      ;2 ms
+    Bcf	    STATUS, 0
+    clrf    PORTD 
+    btfsc   banderas, 0	      ;Sirve para revisar el bit dentro de la bandera
+    goto    displayunidad     ;Sirve para llamar a la subrutina del display	    
+    btfsc   banderas, 1	      
+    goto    displaydecenas     
+    btfsc   banderas, 2	      
+    goto    displayunidad_Sem1 
+    btfsc   banderas, 3	      
+    goto    displaydecenas_Sem1  
+    btfsc   banderas, 4	      
+    goto    displayunidad_Sem2 
+    btfsc   banderas, 5	     
+    goto    displaydecenas_Sem2  
+    btfsc   banderas, 6	      
+    goto    displayunidad_Sem3 
+    btfsc   banderas, 7	      
+    goto    displaydecenas_Sem3  
+    movlw   00000001B
+    movwf   banderas
+
+Controles:		    
+;---------------Programación de parpadeo y semaforo_3---------------
+    movlw   4		;Parpadeo del semaforo 3
+    subwf   Sem_1, 0	;Guarda en w
+    btfss   STATUS, 0
+    GOTO    amarillo_semaforo3
+    movlw   7
+    subwf   Sem_3, 0
+    btfss   STATUS, 0
+    GOTO    Rutina_Parpadeo3
+;-------------- Control de parpadeo de luz amarilla del semaforo_2 -------------
+    call    Parpadeo2
+;---------------Control de titileo y luz amarialla del semaforo 1---------------
+    movlw   4		;Parpadeo Semaforo 1
+    subwf   Sem_1, 0	;Guarda en w
+    btfss   STATUS, 0
+    goto    amarillo_semaforo1
+    movlw   7
+    subwf   Sem_1,0
+    btfss   STATUS, 0
+    goto    Rutina_Parpadeo1
+    return
+;---------------Control de titileo y luz amarialla del semaforo 2-------------
+Parpadeo2:
+    movlw   4
+    subwf   Sem_2, 0	;Guarda en w
+    btfss   STATUS, 0
+    GOTO    amarillo_semaforo2
+    movlw   7
+    subwf   Sem_2,0
+    btfss   STATUS, 0
+    GOTO    Rutina_Parpadeo2
+    return
+ 
+Rutina_Parpadeo1:
+    btfss   parpadeo, 0
+    goto    Off_parpa 
+    bsf     PORTA,0
+    return
+    
+Rutina_Parpadeo2:	;las rutinas del titiliteo
+    btfss   parpadeo, 0
+    goto    Off_parpa 
+    bsf     PORTA,3
+    return
+Rutina_Parpadeo3:
+    btfss   parpadeo, 0
+    goto    Off_parpa
+    bsf     PORTA, 6
+    bcf	    PORTA, 3
+    return
+    
+Off_parpa:		;Sirve para apagar la velocidad del titiliteio segun la velocidad del TMR2
+    bcf     PORTA, 0
+    bcf	    PORTA, 3
+    bcf	    PORTA, 6 
+    RETURN
+
+amarillo_semaforo1:
+    bcf	    PORTA, 0
+    bsf	    PORTA, 1
+    bcf	    PORTA, 2
+    movlw   0		;Parpadeo Sem1
+    subwf   Sem_1, 0	;Guarda en w
+    btfsc   STATUS, 2
+    goto    rojoSE1
+    return
+rojoSE1:
+    bcf	    PORTA, 1
+    bsf	    PORTA, 2
+    return   
+amarillo_semaforo2:
+    bcf	    PORTA, 3
+    bsf	    PORTA, 4
+    bcf	    PORTA, 5
+    movlw   0		
+    subwf   Sem_2, 0	;Guarda en w
+    btfsc   STATUS, 2
+    goto    rojoSE2
+    return
+rojoSE2:
+    bcf	    PORTA, 4
+    bsf	    PORTA, 5
+    return      
+amarillo_semaforo3:
+    bcf	    PORTA, 3
+    bcf	    PORTA, 6
+    bsf	    PORTA, 7
+    movlw   0			;titileo Sem1
+    subwf   Sem_3, 0	;Guarda en w
+    btfsc   STATUS, 2
+    goto    RedPA
+    return
+RedPA:
+    bcf	    PORTA, 7
+    bsf	    PORTB, 7
+    return      
+;------------------------------------------------------------------------------
+displaydecenas:
+    movlw   00000100B
+    movwf   banderas
+    movf    decena1, w	    ;Mover el valor de decena1(Tabla) a w
+    movwf   PORTC	    ;Mover el valor de w a PORTD
+    bsf	    PORTD, 0	    ;Encender bit 5 PORTB para transistor
+    goto    Controles	    ;Siguiente display
+displayunidad:
+    movlw   00000010B
+    movwf   banderas  
+    movf    unidad1, w	    ;Mover el valor de Unidad1(Tabla) a w
+    movwf   PORTC	    ;mover el valor de w a PORTD
+    bsf	    PORTD, 1	    ;Encender bit 5 de PORTB para transistor
+    goto    Controles	    ;Siguiente display
+;-------------------------------------------------------------------------------
+displayunidad_Sem1:
+    movlw   00001000B
+    movwf   banderas
+    movf    unidad22, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 7	    ;Encender bit4 de PORTB para transistor 
+    goto    Controles 
+displaydecenas_Sem1:
+    movlw   00010000B
+    movwf   banderas
+    movf    decena22, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 6	    ;Encender bit4 de PORTB para transistor 
+    goto    Controles
+;-------------------------------------------------------------------------------
+displayunidad_Sem2:
+    movlw   00100000B
+    movwf   banderas
+    movf    unidad33, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 3	    ;Encender bit4 de PORTB para transistor 
+    goto    Controles
+displaydecenas_Sem2:
+    movlw   01000000B
+    movwf   banderas
+    movf    decena33, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 2	    ;Encender bit4 de PORTB para transistor 
+    goto    Controles   
+;-------------------------------------------------------------------------------
+displayunidad_Sem3:
+    movlw   10000000B
+    movwf   banderas
+    movf    unidad44, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 5	    ;Encender bit4 de PORTB para transistor 
+    goto    Controles 
+displaydecenas_Sem3:
+    movlw   00000001B
+    movwf   banderas
+    movf    decena44, w	    ;Mover el valor de centena1 (Tabla) a w
+    movwf   PORTC	    ;Mover w a PORTD
+    bsf	    PORTD, 4	    ;Encender bit4 de PORTB para transistor 
+    movlw   0x00
+    movwf   banderas	    ;Mover literal a banderas
+    goto    Controles  
+;-------------------------------------------------------------------------------
+Interr_Tmr2:
+    BCF    TMR2IF
+    INCF   parpadeo
+    return
+  PSECT code, delta=2, abs
+  ORG 180h	;Posición para el código
+ ;------------------------- TABLA ----------------------------------------------
+  Tabla:
+    clrf  PCLATH
+    bsf   PCLATH,0
+    andlw 0x0F
+    addwf PCL
+    retlw 00111111B          ; 0
+    retlw 00000110B          ; 1
+    retlw 01011011B          ; 2
+    retlw 01001111B          ; 3
+    retlw 01100110B          ; 4
+    retlw 01101101B          ; 5
+    retlw 01111101B          ; 6
+    retlw 00000111B          ; 7
+    retlw 01111111B          ; 8
+    retlw 01101111B          ; 9
+    retlw 01110111B          ; A
+    retlw 01111100B          ; b
+    retlw 00111001B          ; C
+    retlw 01011110B          ; d
+    retlw 01111001B          ; E
+    retlw 01110001B          ; F
+  ;---------------Configuraciones Generales-------------------------------------
+  main: 
+;-----------Configuraciones del mis pines---------------------------------------
+    bsf	    STATUS, 5   ;banco  11
+    bsf	    STATUS, 6	;Banksel ANSEL
+    clrf    ANSEL	;pines digitales
+    clrf    ANSELH
+    
+    bsf	    STATUS, 5	;banco 01
+    bcf	    STATUS, 6	;Banksel TRISA
+    clrf    TRISA	;PORTA A salida
+    clrf    TRISC
+    clrf    TRISD
+    clrf    TRISE
+    movlw   00000111B
+    movwf   TRISB
+    bcf	    OPTION_REG,	7   ;RBPU Enable bit - Habilitar
+    
+    bcf	    STATUS, 5	;banco 00
+    bcf	    STATUS, 6	;Banksel PORTA
+    clrf    PORTA	;Valor incial 0 en puerto A
+    clrf    PORTC
+    clrf    PORTB
+    clrf    PORTD
+;--------Llamamos las subrutinas de configuraciones Generales-------------------
+    call    config_reloj
+    call    config_IOChange
+    call    config_tmr0
+    call    config_tmr1
+    call    config_tmr2
+    call    config_InterrupEnable
+;--------Datos que siempre va leer el main sin importa lo que hagamos-----------
+    banksel PORTA 
+    clrf    estado
+    movlw   0x0F             ;vALORES INICIALES
+    movwf   Sem1_Ahora
+    movf    Sem1_Ahora, W
+    movwf   Sem_1
+    movlw   0x0F
+    movwf   Sem2_Ahora
+    movf    Sem2_Ahora, W
+    movwf   Sem_2
+    movlw   0x0F
+    movwf   Sem3_Ahora
+    movf    Sem3_Ahora, W
+    movwf   Sem_3
+    bsf	    PORTA, 0
+    bcf	    PORTA, 1
+    bsf	    PORTA, 5
+    bsf	    PORTB, 7
+;----------loop principal---------------------
+ loop:
+    btfss   TMR1IF	    ;Funcionamiento semaforo1
+    goto    $-1
+    reiniciar_Tmr1
+    call    Sema1
+    
+    movf    Sem_1, w    ;Displays semaforo1
+    movwf   Cont_1
+    call    divcentenas	
+    call    displaydecimal
+    
+    movf    Sem_2, w    ;Displays semaforo2    
+    movwf   Cont_3
+    call    divcentenas_S2	
+    call    displaydecimal_S2
+    
+    movf    Sem_3, w    ;Displays semaforo1    
+    movwf   Cont_4
+    call    divcentenas_S3	
+    call    displaydecimal_S3
+    goto    loop
+
+;------------------------- Sub rutinas ----------------------------------------- 
+;----------------Incrementos
+Sema1: 
+    movlw   0x00
+    subwf   Sem_1
+    btfsc   STATUS, 2
+    goto    Sema2
+    decf    Sem_1
+    return 
+Sema2:
+    bsf	    PORTA, 3	;verde
+    bcf	    PORTA, 5	;Rojo 
+    clrf    Sem_1  
+    movlw   0x00
+    subwf   Sem_2
+    btfsc   STATUS, 2
+    goto    Sema3
+    decf    Sem_2
+    return 
+Sema3:
+    bsf	    PORTA, 6
+    bsf	    PORTA, 5
+    bcf     PORTB, 7
+    clrf    Sem_2
+    movlw   0x00
+    subwf   Sem_3 
+    btfsc   STATUS, 2
+    goto    asignarvalor
+    decf    Sem_3
+    return 
+asignarvalor:
+    movf    Sem1_Ahora, W
+    movwf   Sem_1
+    movf    Sem2_Ahora, W
+    movwf   Sem_2
+    movf    Sem3_Ahora, W
+    movwf   Sem_3
+    movlw   00100001B
+    movwf   PORTA
+    bsf	    PORTB, 7
+    return
+;------------------DivisiónRutinaPrincipal-------------------
+displaydecimal:
+    movf    centena, w
+    call    Tabla	;Asignamos el valor de centena a un valor de la tabla displays
+    movwf   centena1	;Lo guardamos en variable centena1
+    movf    decena, w	
+    call    Tabla	;Asignamos el valor de decena a un valor de la tabla displays
+    movwf   decena1	;Lo guardamos en variable decena1
+    movf    unidad, w
+    call    Tabla	;Asignamos el valor de unidad a un valor de la tabla displays
+    movwf   unidad1	;Lo guardamos en variable unidad1
+    return
+divcentenas:
+    clrf    centena	 ;Limpiamos la variable centena 
+    movlw   01100100B    ;asignamos EL VALOR DE "100" W
+    subwf   Cont_1, 1	 ;resta f DE w(ValorPORTA-100) y guardamos de nuevo en V1
+    btfss   STATUS,0	 ;Revisamos bandera de carry de Status (Indica un cambio de signo en la resta)
+    goto    Decenas	 ;llama a subrutina para resta en decena
+    incf    centena, 1	 ;Incrementa el valor de centena y se guarda en ella misma
+    goto    $-5		 ;Regresa 5 líneas atras y resta nuevamente 
+Decenas:
+    clrf    decena	;Limpiamo variable decena
+    movlw   01100100B	 
+    addwf   Cont_1	;Sumamos 100 a V1 (Para que sea el valor ultimo correcto)
+    movlw   00001010B	;Valor de 10 a w   
+    subwf   Cont_1,1	;Restamos f-w (V1-10) guardamos en V1
+    btfss   STATUS,0	;Revisamo bit de carry Status
+    goto    Unidades	;Llama a subrutina UNIDADES si hay un cambio de signo en la resta
+    incf    decena, 1	;Incrementa variable decena 
+    goto    $-5		;Ejecuta resta en decenas 
+Unidades:
+    clrf    unidad	;Limpiamos variable unidad
+    movlw   00001010B	
+    addwf   Cont_1	;Sumamos 10 a V1(Valor ultimo correcto)
+    movlw   00000001B	;Valor de 1 a w
+    subwf   Cont_1,1	;Restamos f-w y guardamos en V1
+    btfss   STATUS, 0	;Revisar bit carry de status
+    return		;Return a donde fue llamado
+    incf    unidad, 1	;Incrementar variable unidad
+    goto    $-5		;Ejecutar de nuevo resta de unidad 
+    
+;---------------------------RutinaSemaforo1---------------------------
+displaydecimal_S1:
+    movf    centena2, w
+    call    Tabla	;Asignamos el valor de centena a un valor de la tabla displays
+    movwf   centena22	;Lo guardamos en variable centena1
+    movf    decena2, w	
+    call    Tabla	;Asignamos el valor de decena a un valor de la tabla displays
+    movwf   decena22	;Lo guardamos en variable decena1
+    movf    unidad2, w
+    call    Tabla	;Asignamos el valor de unidad a un valor de la tabla displays
+    movwf   unidad22	;Lo guardamos en variable unidad1
+    return
+divcentenas_S1:
+    clrf    centena2	 ;Limpiamos la variable centena 
+    movlw   01100100B    ;asignamos EL VALOR DE "100" W
+    subwf   Cont_2, 1	 ;resta f DE w(ValorPORTA-100) y guardamos de nuevo en V1
+    btfss   STATUS,0	 ;Revisamos bandera de carry de Status (Indica un cambio de signo en la resta)
+    goto    Decenas_S1	 ;llama a subrutina para resta en decena
+    incf    centena2, 1	 ;Incrementa el valor de centena y se guarda en ella misma
+    goto    $-5		 ;Regresa 5 líneas atras y resta nuevamente 
+Decenas_S1:
+    clrf    decena2	;Limpiamo variable decena
+    movlw   01100100B	 
+    addwf   Cont_2	;Sumamos 100 a V1 (Para que sea el valor ultimo correcto)
+    movlw   00001010B	;Valor de 10 a w   
+    subwf   Cont_2,1	;Restamos f-w (V1-10) guardamos en V1
+    btfss   STATUS,0	;Revisamo bit de carry Status
+    goto    Unidades_S1	;Llama a subrutina UNIDADES si hay un cambio de signo en la resta
+    incf    decena2, 1	;Incrementa variable decena 
+    goto    $-5		;Ejecuta resta en decenas 
+Unidades_S1:
+    clrf    unidad2	;Limpiamos variable unidad
+    movlw   00001010B	
+    addwf   Cont_2	;Sumamos 10 a V1(Valor ultimo correcto)
+    movlw   00000001B	;Valor de 1 a w
+    subwf   Cont_2,1	;Restamos f-w y guardamos en V1
+    btfss   STATUS, 0	;Revisar bit carry de status
+    return		;Return a donde fue llamado
+    incf    unidad2, 1	;Incrementar variable unidad
+    goto    $-5		;Ejecutar de nuevo resta de unidad 
+;-------------------------------------------------------------------------------
+displaydecimal_S2:
+    movf    centena3, w
+    call    Tabla	;Asignamos el valor de centena a un valor de la tabla displays
+    movwf   centena33	;Lo guardamos en variable centena1
+    movf    decena3, w	
+    call    Tabla	;Asignamos el valor de decena a un valor de la tabla displays
+    movwf   decena33	;Lo guardamos en variable decena1
+    movf    unidad3, w
+    call    Tabla	;Asignamos el valor de unidad a un valor de la tabla displays
+    movwf   unidad33	;Lo guardamos en variable unidad1
+    return
+divcentenas_S2:
+    clrf    centena3	 ;Limpiamos la variable centena 
+    movlw   01100100B    ;asignamos EL VALOR DE "100" W
+    subwf   Cont_3, 1	 ;resta f DE w(ValorPORTA-100) y guardamos de nuevo en V1
+    btfss   STATUS,0	 ;Revisamos bandera de carry de Status (Indica un cambio de signo en la resta)
+    goto    DECENAS_S2	 ;llama a subrutina para resta en decena
+    incf    centena3, 1	 ;Incrementa el valor de centena y se guarda en ella misma
+    goto    $-5		 ;Regresa 5 líneas atras y resta nuevamente 
+DECENAS_S2:
+    clrf    decena3	 ;Limpiamo variable decena
+    movlw   01100100B	 
+    addwf   Cont_3	;Sumamos 100 a V1 (Para que sea el valor ultimo correcto)
+    movlw   00001010B	;Valor de 10 a w   
+    subwf   Cont_3,1	;Restamos f-w (V1-10) guardamos en V1
+    btfss   STATUS,0	;Revisamo bit de carry Status
+    goto    UNIDADES_S2	;Llama a subrutina UNIDADES si hay un cambio de signo en la resta
+    incf    decena3, 1	;Incrementa variable decena 
+    goto    $-5		;Ejecuta resta en decenas 
+UNIDADES_S2:
+    clrf    unidad3	;Limpiamos variable unidad
+    movlw   00001010B	
+    addwf   Cont_3	;Sumamos 10 a V1(Valor ultimo correcto)
+    movlw   00000001B	;Valor de 1 a w
+    subwf   Cont_3,1	;Restamos f-w y guardamos en V1
+    btfss   STATUS, 0	;Revisar bit carry de status
+    return		;Return a donde fue llamado
+    incf    unidad3, 1	;Incrementar variable unidad
+    goto    $-5		;Ejecutar de nuevo resta de unidad    
+;-------------------------------------------------------------------------------
+displaydecimal_S3:
+    movf    centena4, w
+    call    Tabla	;Asignamos el valor de centena a un valor de la tabla displays
+    movwf   centena44	;Lo guardamos en variable centena1
+    movf    decena4, w	
+    call    Tabla	;Asignamos el valor de decena a un valor de la tabla displays
+    movwf   decena44	;Lo guardamos en variable decena1
+    movf    unidad4, w
+    call    Tabla	;Asignamos el valor de unidad a un valor de la tabla displays
+    movwf   unidad44	;Lo guardamos en variable unidad1
+    return
+divcentenas_S3:
+    clrf    centena4	 ;Limpiamos la variable centena 
+    movlw   01100100B    ;asignamos EL VALOR DE "100" W
+    subwf   Cont_4, 1	 ;resta f DE w(ValorPORTA-100) y guardamos de nuevo en V1
+    btfss   STATUS,0	 ;Revisamos bandera de carry de Status (Indica un cambio de signo en la resta)
+    goto    Decenas_S3	 ;llama a subrutina para resta en decena
+    incf    centena4, 1	 ;Incrementa el valor de centena y se guarda en ella misma
+    goto    $-5		 ;Regresa 5 líneas atras y resta nuevamente 
+Decenas_S3:
+    clrf    decena4	;Limpiamo variable decena
+    movlw   01100100B	 
+    addwf   Cont_4	;Sumamos 100 a V1 (Para que sea el valor ultimo correcto)
+    movlw   00001010B	;Valor de 10 a w   
+    subwf   Cont_4,1	;Restamos f-w (V1-10) guardamos en V1
+    btfss   STATUS,0	;Revisamo bit de carry Status
+    goto    Unidades_S3	;Llama a subrutina UNIDADES si hay un cambio de signo en la resta
+    incf    decena4, 1	;Incrementa variable decena 
+    goto    $-5		;Ejecuta resta en decenas 
+Unidades_S3:
+    clrf    unidad4	;Limpiamos variable unidad
+    movlw   00001010B	
+    addwf   Cont_4	;Sumamos 10 a V1(Valor ultimo correcto)
+    movlw   00000001B	;Valor de 1 a w
+    subwf   Cont_4,1	;Restamos f-w y guardamos en V1
+    btfss   STATUS, 0	;Revisar bit carry de status
+    return		;Return a donde fue llamado
+    incf    unidad4, 1	;Incrementar variable unidad
+    goto    $-5		;Ejecutar de nuevo resta de unidad    
+;----------------------Subrutinas de Configuraciones----------------------------    
+config_IOChange:
+    banksel TRISA
+    
+    banksel PORTA
+    movf    PORTB, W	;Condición mismatch
+    return
+ config_tmr0:
+    banksel OPTION_REG   ;Banco de registros asociadas al puerto A
+    bcf	    T0CS    ; reloj interno clock selection
+    bcf	    PSA	    ;Prescaler 
+    bcf	    PS2
+    bcf	    PS1
+    bsf	    PS0	    ;PS = 111 Tiempo en ejecutar , 256
+    
+    reiniciar_Tmr0  ;Macro reiniciar tmr0
+    return
+ config_tmr1:
+    banksel T1CON
+    bcf	    TMR1GE	;tmr1 como contador
+    bcf	    TMR1CS	;Seleccionar reloj interno (FOSC/4)
+    bsf	    TMR1ON	;Encender Tmr1
+    bcf	    T1OSCEN	;Oscilador LP apagado
+    bsf	    T1CKPS1	;Preescaler 10 = 1:4
+    bcf	    T1CKPS0 
+    reiniciar_Tmr1
+    return
+ config_tmr2:
+    banksel T2CON
+    bsf	    T2CON, 7 
+    bsf	    TMR2ON
+    bsf	    TOUTPS3	;Postscaler 1:16
+    bsf	    TOUTPS2
+    bsf	    TOUTPS1
+    bsf	    TOUTPS0
+    bsf	    T2CKPS1	;Preescaler 1:16
+    bsf	    T2CKPS0
+    reiniciar_tmr2
+    return
+ config_reloj:
+    banksel OSCCON	;Banco OSCCON 
+    bsf	    IRCF2	;OSCCON configuración bit2 IRCF
+    bcf	    IRCF1	;OSCCON configuracuón bit1 IRCF
+    bcf	    IRCF0	;OSCCON configuración bit0 IRCF
+    bsf	    SCS		;reloj interno , 1Mhz
+    return
+config_InterrupEnable:
+    BANKSEL PIE1
+    bsf	    T0IE	;Habilitar bit de interrupción tmr0
+    BSF     TMR2IE
+    BANKSEL T1CON 
+    bsf	    GIE		;Habilitar en general las interrupciones, Globales
+    bsf	    RBIE	;Se encuentran en INTCON
+    bcf	    RBIF	;Limpiamos bandera
+    bcf	    T0IF	;Limpiamos bandera de overflow de tmr0
+    BCF     TMR2IF
+    return
+end
